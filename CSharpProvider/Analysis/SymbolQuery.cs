@@ -1,10 +1,11 @@
-using System.Text.Json;
 using System.Text.RegularExpressions;
 using Google.Protobuf.WellKnownTypes;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Provider;
+using YamlDotNet.Serialization;
+using YamlDotNet.Serialization.NamingConventions;
 
 namespace CSharpProvider.Analysis;
 
@@ -31,22 +32,49 @@ public record QueryResult(
     string? FqdnMethod,
     string? FqdnField);
 
+// YAML structure that analyzer-lsp sends
+internal class ConditionWrapper
+{
+    public ReferencedCondition? Referenced { get; set; }
+}
+
+internal class ReferencedCondition
+{
+    public string Pattern { get; set; } = string.Empty;
+    public string? Location { get; set; }
+    [YamlMember(Alias = "file_paths")]
+    public List<string>? FilePaths { get; set; }
+}
+
 public static class SymbolQuery
 {
+    private static readonly IDeserializer YamlDeserializer = new DeserializerBuilder()
+        .WithNamingConvention(UnderscoredNamingConvention.Instance)
+        .IgnoreUnmatchedProperties()
+        .Build();
+
     public static QueryCondition ParseCondition(string conditionInfo)
     {
-        using var doc = JsonDocument.Parse(conditionInfo);
-        var root = doc.RootElement;
-        var referenced = root.GetProperty("referenced");
+        // The analyzer-lsp sends YAML with the full rule context, including:
+        // tags, template, ruleID, and the 'referenced' section we need
+        var wrapper = YamlDeserializer.Deserialize<ConditionWrapper>(conditionInfo);
 
-        var pattern = referenced.GetProperty("pattern").GetString()
-            ?? throw new ArgumentException("Missing pattern");
+        if (wrapper.Referenced == null)
+        {
+            throw new ArgumentException("Missing 'referenced' section in condition info");
+        }
+
+        var referenced = wrapper.Referenced;
+
+        if (string.IsNullOrEmpty(referenced.Pattern))
+        {
+            throw new ArgumentException("Missing pattern in referenced condition");
+        }
 
         var location = LocationType.All;
-        if (referenced.TryGetProperty("location", out var locProp))
+        if (!string.IsNullOrEmpty(referenced.Location))
         {
-            var locStr = locProp.GetString()?.ToUpperInvariant();
-            location = locStr switch
+            location = referenced.Location.ToUpperInvariant() switch
             {
                 "METHOD" => LocationType.Method,
                 "FIELD" => LocationType.Field,
@@ -56,17 +84,16 @@ public static class SymbolQuery
         }
 
         List<string>? filePaths = null;
-        if (referenced.TryGetProperty("file_paths", out var fpProp) && fpProp.ValueKind == JsonValueKind.Array)
+        if (referenced.FilePaths != null && referenced.FilePaths.Count > 0)
         {
-            filePaths = fpProp.EnumerateArray()
-                .Select(e => e.GetString()!)
+            filePaths = referenced.FilePaths
                 .Where(s => !string.IsNullOrEmpty(s))
                 .ToList();
             if (filePaths.Count == 0)
                 filePaths = null;
         }
 
-        return new QueryCondition(new Regex(pattern), location, filePaths);
+        return new QueryCondition(new Regex(referenced.Pattern), location, filePaths);
     }
 
     public static List<QueryResult> Execute(
