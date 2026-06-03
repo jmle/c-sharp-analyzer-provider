@@ -692,7 +692,8 @@ public static class SymbolQuery
                     StartPosition = startPos,
                     EndPosition = endPos,
                 },
-                LineNumber = r.StartLine,
+                // LineNumber should be 1-based for display (Roslyn uses 0-based)
+                LineNumber = r.StartLine + 1,
                 Variables = variables,
             };
         }).ToList();
